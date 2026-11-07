@@ -1,4 +1,4 @@
-// Package podidentity is EKS Pod Identity on EZGH Bots: the mutating webhook that gives pods of an
+// Package podidentity is pod identity on EZGH Bots: the mutating webhook that gives pods of an
 // associated service account a projected token and the two EZGH_CONTAINER_* variables. The node
 // agent that exchanges that token for a Bot key on each request is package agent.
 package podidentity

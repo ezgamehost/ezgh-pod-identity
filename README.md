@@ -1,58 +1,71 @@
 # ezgh-pod-identity
 
-Pod identity for EZGH Kubernetes, the counterpart of eks-pod-identity-agent and
-amazon-eks-pod-identity-webhook: a pod whose service account has a pod identity association gets
-short-lived EZGH API keys for that association's Bot, with no secret stored in the cluster. The
-EZGH SDKs and CLI read them through `EZGH_CONTAINER_CREDENTIALS_FULL_URI` and
-`EZGH_CONTAINER_AUTHORIZATION_TOKEN_FILE`.
+Workload credentials for [EZGH Kubernetes](https://docs.ezghcloud.com). A pod whose service account
+has a pod identity association receives short-lived EZGH API keys for the associated Bot, with no
+long-lived secret stored in the cluster.
 
-| Binary | Runs | Job |
+EZGH Kubernetes installs and upgrades this component for you. This repository holds its source
+code; you don't need to deploy it yourself.
+
+## How it works
+
+1. You create a pod identity association between a Kubernetes service account and an EZGH Bot.
+2. When a pod using that service account is created, the webhook adds a projected service account
+   token and two environment variables: `EZGH_CONTAINER_CREDENTIALS_FULL_URI` and
+   `EZGH_CONTAINER_AUTHORIZATION_TOKEN_FILE`.
+3. The EZGH SDKs and CLI read those variables and request credentials from the node's agent.
+4. The agent exchanges the pod's token for a short-lived Bot API key on every request. Nothing is
+   cached on the node, and deleting the association stops new credentials immediately.
+
+## Components
+
+| Binary | Runs on | Purpose |
 | --- | --- | --- |
-| `ezgh-pod-identity-webhook` | each control-plane VM, systemd unit `ezgh-cloud@pod-identity-webhook`, `https://127.0.0.1:9445/mutate-pods` | Mutating webhook: gives pods of associated service accounts (init containers and sidecars too) a projected token (audience `pods.kubernetes.ezghcloud.com`) and the two variables. It reads the associations from `/etc/ezgh/cloud.json` on each admission (`EZGH_CLOUD_CONFIG` overrides the path) and serves the certificate k8sagent (the control-plane VM's agent) writes to `/run/ezgh/webhook` |
-| `ezgh-pod-identity-agent` | every node, the pod-identity-agent add-on's host-network DaemonSet, `GET http://169.254.170.23/v1/credentials` | Exchanges the pod's token for a Bot key at kubernetes-api's `…/clusters/<kcl_>/pod-credentials` on every request: nothing is kept, redirects are never followed, 429 and 503 pass through with `Retry-After` |
+| `ezgh-pod-identity-webhook` | The cluster's control plane | Mutating admission webhook that configures pods of associated service accounts, including init and sidecar containers |
+| `ezgh-pod-identity-agent` | Every node, as a host-network DaemonSet | Serves `GET http://169.254.170.23/v1/credentials` to pods, exchanging each pod's token for a Bot API key |
 
-Logs are JSON lines through the vendored kit (`internal/kit/logging`).
+Logs are structured JSON.
 
-## Build and test
+## Container image and binaries
 
-Go 1.27.1 (`go.mod`).
+| Artifact | Location |
+| --- | --- |
+| Agent image (linux/amd64) | `q5zljyjh52il.registry.ezghcloud.com/kubernetes/ezgh-pod-identity-agent:<version>` |
+| Binaries (linux/amd64, linux/arm64) with `SHA256SUMS` | [GitHub Releases](https://github.com/ezgamehost/ezgh-pod-identity/releases) |
+
+## Building from source
+
+Requires Go 1.27.1 or later.
+
+```sh
+CGO_ENABLED=0 GOOS=linux go build ./cmd/...
+docker build .
+```
+
+## Testing
 
 | Check | Command |
 | --- | --- |
-| Build | `CGO_ENABLED=0 GOOS=linux go build ./cmd/...` |
-| Image | `docker build .` (the agent on distroless) |
-| Tests | `go test -race $(go list ./... \| grep -v /internal/kit/)` |
-| Lint | `gofmt -l .`; `go vet` and `go run honnef.co/go/tools/cmd/staticcheck@v0.8.1` over `$(go list ./... \| grep -v /internal/kit/)` (service-template checks the kit) |
+| Unit tests | `go test -race $(go list ./... \| grep -v /internal/kit/)` |
+| Lint | `gofmt -l .`, `go vet` and `staticcheck` |
 | Logging | `scripts/check-logging.sh` |
 
-CI (`.github/workflows/ci.yml`) runs them and builds the image, without pushing it, on every pull
-request and push to main.
+Continuous integration runs these and builds the image on every pull request and push to `main`.
 
 ## Releases
 
-Push a tag `vX.Y.Z` on main. `.github/workflows/release.yml` publishes the GitHub release
-(`ezgh-pod-identity-agent-linux-{amd64,arm64}`, `ezgh-pod-identity-webhook-linux-{amd64,arm64}`,
-`SHA256SUMS`) and pushes the linux/amd64 agent image to the kubernetes-addons Registry as
-`<host>/kubernetes/ezgh-pod-identity-agent:<tag>`. The image goes first and the binaries only after it, from GitHub Environment `release`
-(limited to tags `v*`): secret `KUBERNETES_ADDONS_REGISTRY_KEY` (a platform-organization Bot key that can push to project
-kubernetes-addons) and variable `KUBERNETES_ADDONS_REGISTRY_HOST` (`<hostId>.registry.ezghcloud.com`).
-A published tag never moves: a fix ships as a new version. The add-on bundle runs the image's
-commands and flags as they are: changing one needs a new bundle version in kubernetes-stack too.
+Releases follow semantic versioning. Pushing a `vX.Y.Z` tag on `main` publishes the container image
+and then the binaries. Published versions are immutable; fixes ship as new versions.
 
-kubernetes-stack consumes both: the `pod-identity-agent` add-on bundle (`addons/pod-identity-agent/<version>`)
-renders the agent image at its version, and the control-plane payload pins
-`ezgh-pod-identity-webhook` by version and SHA-256 in `deploy/images/releases.txt` (a systemd drop-in
-points `ezgh-cloud@pod-identity-webhook` at this binary).
+## Vendored code
 
-## Copied code
+`internal/kit` and `internal/cloud/config` are vendored from shared EZGH libraries and refreshed
+with `scripts/sync-kit.sh` and `scripts/sync-copies.sh`. Changes to them are made upstream.
 
-Other repositories' code is copied in, not imported, each copy with its own sync:
+## Security
 
-| Path | Source | Sync |
-| --- | --- | --- |
-| `internal/kit` | ezgamehost/service-template `kit/go` (commit in `internal/kit/KIT_VERSION`) | `scripts/sync-kit.sh` |
-| `internal/cloud/config` (the `cloud.json` reader) | ezgamehost/ezgh-cloud-controller (commit in `COPIES`) | `scripts/sync-copies.sh ezgh-cloud-controller` |
+Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache-2.0 ([LICENSE](LICENSE)). Security reports: [SECURITY.md](SECURITY.md).
+Licensed under the [Apache License 2.0](LICENSE).
